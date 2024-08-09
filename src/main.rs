@@ -11,11 +11,7 @@ use aws_sdk_dynamodb::{
     Client,
 };
 
-/// This is the main body for the function.
-/// Write your code inside it.
-/// There are some code example in the following URLs:
-/// - https://github.com/awslabs/aws-lambda-rust-runtime/tree/main/examples
-async fn function_handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
+async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
     let re = Regex::new(r"^/(?<uuid>[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-4[A-Za-z0-9]{3}-[AaBb98][A-Za-z0-9]{3}-[A-Za-z0-9]{12})$").unwrap();
     let Some(caps) = re.captures(event.raw_http_path()) else {
         return Ok(Response::builder()
@@ -27,7 +23,13 @@ async fn function_handler(client: &Client, event: Request) -> Result<Response<Bo
     let key = &caps["uuid"];
 
     let message = format!("Key {key}.");
-
+/*
+    client
+        .update_item()
+        .table_name("Dedup")
+        .key(key)
+        .update_expression("")
+*/
     // Extract some useful information from the request
 //    let who = event
 //        .query_string_parameters_ref()
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Error> {
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::v2023_11_09()).await;
     let client = Client::new(&config);
 
-    run(service_fn(async |event: Request| {
-        function_handler(&client, event).await
+    run(service_fn( |event: Request| async {
+        handler(&client, event).await
     })).await
 }
