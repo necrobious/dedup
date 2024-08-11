@@ -40,6 +40,27 @@ fn into_json (attributes: &HashMap<String, AttributeValue>) -> Value {
     serde_json::Value::Object(map)
 }
 
+async fn json_response(response: &Value) -> Result<Response<Body>, Error> {
+    let resp = match serde_json::to_string(&response) {
+        Ok(json_resp) => {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(json_resp.into())
+                .map_err(Box::new)?
+        },
+        _ => {
+            Response::builder()
+                .status(500)
+                .header("content-type", "text/plain")
+                .body(format!("Internal Server Error: response serialization failed;").into())
+                .map_err(Box::new)?
+        }
+    };
+
+    Ok(resp)
+}
+
 async fn get_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
     let response = client
         .get_item()
@@ -67,25 +88,7 @@ async fn get_handler(client: &Client, key:&str) -> Result<Response<Body>, Error>
     };
 
     let obj = into_json(&item);
-
-    let resp = match serde_json::to_string(&obj) {
-        Ok(json_resp) => {
-            Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(json_resp.into())
-                .map_err(Box::new)?
-        },
-        _ => {
-            Response::builder()
-                .status(500)
-                .header("content-type", "text/plain")
-                .body(format!("Internal Server Error: response serialization failed;").into())
-                .map_err(Box::new)?
-        }
-    };
-
-    Ok(resp)
+    json_response(&obj).await
 }
 
 async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
@@ -129,25 +132,7 @@ async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error>
     };
 
     let obj = into_json(&attributes);
-
-    let resp = match serde_json::to_string(&obj) {
-        Ok(json_resp) => {
-            Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(json_resp.into())
-                .map_err(Box::new)?
-        },
-        _ => {
-            Response::builder()
-                .status(500)
-                .header("content-type", "text/plain")
-                .body(format!("Internal Server Error: response serialization failed;").into())
-                .map_err(Box::new)?
-        }
-    };
-
-    Ok(resp)
+    json_response(&obj).await
 }
 
 async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
@@ -173,23 +158,6 @@ async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Erro
             .body(format!("Method Not Allowed").into())
             .map_err(Box::new)?)
     }
-
-    // Extract some useful information from the request
-//    let who = event
-//        .query_string_parameters_ref()
-//        .and_then(|params| params.first("name"))
-//        .unwrap_or("world");
-
-
-    // Return something that implements IntoResponse.
-    // It will be serialized to the right response event automatically by the runtime
-    /*
-    let resp = Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .body(message.into())
-        .map_err(Box::new)?;
-*/
 }
 
 #[tokio::main]
