@@ -1,14 +1,12 @@
-# Welcome to your CDK TypeScript project
+# DynamoDB Deduplication Oracle 
 
-This is a blank project for CDK development with TypeScript.
+An example of how to perform deduplication using DynamoDB as the persistent state.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+Noting and retrieving a key are done with a single query, elminiating many of the race and performance conditions associated with deduplication.
+To note a key, use a PUT call including a valid (v4) UUID. The response will include:
+ - `cnt`: `number` the number of times the UUID key has been noted by the oracle; `cnt` value of `1` indicates the first time the oracle has seen this key.
+ - `lst`: `number` the last time this UUID key was noted by the oracle (unix time, utc).
+ - `fst`: `number` the first time this UUID key was noted by the oracle (unix time, utc).
 
-## Useful commands
+To query a key without noting it, use GET instead, the response is the same as above.
 
-* `npm run build`   compile typescript to js
-* `npm run watch`   watch for changes and compile
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
