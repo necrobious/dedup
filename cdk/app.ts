@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import { DedupStack } from '../lib/dedup-stack';
+import { DedupStack } from './stacks/dedup-stack';
 
 const app = new cdk.App();
 new DedupStack(app, 'DedupStack', {
