@@ -1,31 +1,94 @@
 use lambda_http::{run, service_fn, tracing, Body, Error, Request, RequestExt, Response};
 use regex::Regex;
-use std::time::{SystemTime, Duration, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::hash_map::HashMap;
+use std::str::FromStr;
 use aws_config;
 use aws_sdk_dynamodb::{
-    operation::{
-        batch_write_item::BatchWriteItemError, delete_item::DeleteItemError,
-        put_item::PutItemError, query::QueryError, scan::ScanError,
-    },
-    primitives::Blob,
     types::{AttributeValue, ReturnValue},
     Client,
 };
+use serde_json::{ Value };
 
-async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
-    let re = Regex::new(r"^/(?<uuid>[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-4[A-Za-z0-9]{3}-[AaBb98][A-Za-z0-9]{3}-[A-Za-z0-9]{12})$").unwrap();
+fn num_value (attributes: &HashMap<String, AttributeValue>, key: &str) -> Option<Value> {
+    attributes
+        .get(key)
+        .filter(|av| av.is_n())
+        .and_then(|av| av.as_n().ok())
+        .and_then(|s| serde_json::value::Number::from_str(s.as_str()).ok())
+        .map(|n| Value::Number(n))
+}
 
-    let Some(caps) = re.captures(event.raw_http_path()) else {
+fn into_json (attributes: &HashMap<String, AttributeValue>) -> Value {
+    let mut map = serde_json::map::Map::new();
+
+    let cnt = num_value(&attributes, "cnt");
+    if cnt.is_some() {
+        map.insert("cnt".to_string(), cnt.unwrap());
+    }
+
+    let lst = num_value(&attributes, "lst");
+    if lst.is_some() {
+        map.insert("lst".to_string(), lst.unwrap());
+    }
+
+    let fst = num_value(&attributes, "fst");
+    if fst.is_some() {
+        map.insert("fst".to_string(), fst.unwrap());
+    }
+
+    serde_json::Value::Object(map)
+}
+
+async fn get_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
+    let response = client
+        .get_item()
+        .table_name("Dedup")
+        .key("pk", AttributeValue::S(key.into()))
+        .projection_expression("cnt,fst,lst")
+        .send()
+        .await;
+
+    if response.is_err() {
+        // TODO: get the error and report it
         return Ok(Response::builder()
-            .status(400)
+            .status(500)
             .header("content-type", "text/plain")
-            .body(format!("Bad Request").into())
+            .body(format!("Internal Server Error: {:?}; key={};", response, key).into())
+            .map_err(Box::new)?)
+    }
+
+    let Some(item) = response.unwrap().item else {
+        return Ok(Response::builder()
+            .status(404)
+            .header("content-type", "text/plain")
+            .body(format!("Key not found: {}", key).into())
             .map_err(Box::new)?)
     };
-    let key = &caps["uuid"];
 
-    // let message = format!("Key {key}.");
+    let obj = into_json(&item);
 
+    let resp = match serde_json::to_string(&obj) {
+        Ok(json_resp) => {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(json_resp.into())
+                .map_err(Box::new)?
+        },
+        _ => {
+            Response::builder()
+                .status(500)
+                .header("content-type", "text/plain")
+                .body(format!("Internal Server Error: response serialization failed;").into())
+                .map_err(Box::new)?
+        }
+    };
+
+    Ok(resp)
+}
+
+async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH).map(|dur|dur.as_secs()) else {
         return Ok(Response::builder()
             .status(500)
@@ -55,14 +118,62 @@ async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Erro
             .header("content-type", "text/plain")
             .body(format!("Internal Server Error: {:?}; key={}; exp={}; now={};", response, key, exp, now).into())
             .map_err(Box::new)?)
-
     }
 
-    let result = response.unwrap().attributes.unwrap(); // TODO: second unwrap is not safe
-//    let json = result.into_iter().map(|(k,v)| (k, if v.is_n {} else {} ) ).collect::<Value>(); 
-    
+    let Some(attributes) = response.unwrap().attributes else {
+        return Ok(Response::builder()
+            .status(500)
+            .header("content-type", "text/plain")
+            .body(format!("Internal Server Error: missing data after update;").into())
+            .map_err(Box::new)?)
+    };
 
-    let message = format!("key={}; exp={}; now={}; result={:?}", key, exp, now, result);
+    let obj = into_json(&attributes);
+
+    let resp = match serde_json::to_string(&obj) {
+        Ok(json_resp) => {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(json_resp.into())
+                .map_err(Box::new)?
+        },
+        _ => {
+            Response::builder()
+                .status(500)
+                .header("content-type", "text/plain")
+                .body(format!("Internal Server Error: response serialization failed;").into())
+                .map_err(Box::new)?
+        }
+    };
+
+    Ok(resp)
+}
+
+async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
+    let re = Regex::new(r"^/(?<uuid>[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-4[A-Za-z0-9]{3}-[AaBb98][A-Za-z0-9]{3}-[A-Za-z0-9]{12})$").unwrap();
+    let Some(caps) = re.captures(event.raw_http_path()) else {
+        return Ok(Response::builder()
+            .status(400)
+            .header("content-type", "text/plain")
+            .body(format!("Bad Request").into())
+            .map_err(Box::new)?)
+    };
+    let key = &caps["uuid"];
+
+    let m = event.method();
+    if m == "PUT" {
+        put_handler(client, key).await
+    } else if m == "GET" {
+        get_handler(client, key).await
+    } else {
+        return Ok(Response::builder()
+            .status(405)
+            .header("content-type", "text/plain")
+            .body(format!("Method Not Allowed").into())
+            .map_err(Box::new)?)
+    }
+
     // Extract some useful information from the request
 //    let who = event
 //        .query_string_parameters_ref()
@@ -72,12 +183,13 @@ async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Erro
 
     // Return something that implements IntoResponse.
     // It will be serialized to the right response event automatically by the runtime
+    /*
     let resp = Response::builder()
         .status(200)
-        .header("content-type", "text/plain")
+        .header("content-type", "application/json")
         .body(message.into())
         .map_err(Box::new)?;
-    Ok(resp)
+*/
 }
 
 #[tokio::main]
