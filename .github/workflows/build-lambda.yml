@@ -32,6 +32,7 @@ jobs:
         arch: aarch64
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo lambda build --release --output-format zip --arm64
+      #run: cargo lambda build --release --output-format zip --arm64
+      run: cargo lambda --version
     #- name: Run tests
     #  run: cargo test --verbose
