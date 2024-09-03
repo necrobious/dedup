@@ -1,46 +1,21 @@
 use lambda_http::{run, service_fn, tracing, Body, Error, Request, RequestExt, Response};
 use regex::Regex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::hash_map::HashMap;
-use std::str::FromStr;
 use aws_config;
 use aws_sdk_dynamodb::{
-    types::{AttributeValue, ReturnValue},
+    types::ReturnValue,
     Client,
 };
-use serde_json::{ Value };
+use serde::{ Serialize, Deserialize };
 
-fn num_value (attributes: &HashMap<String, AttributeValue>, key: &str) -> Option<Value> {
-    attributes
-        .get(key)
-        .filter(|av| av.is_n())
-        .and_then(|av| av.as_n().ok())
-        .and_then(|s| serde_json::value::Number::from_str(s.as_str()).ok())
-        .map(|n| Value::Number(n))
+#[derive(Serialize, Deserialize)]
+struct Record {
+    cnt: u64,
+    fst: u64,
+    lst: u64,
 }
 
-fn into_json (attributes: &HashMap<String, AttributeValue>) -> Value {
-    let mut map = serde_json::map::Map::new();
-
-    let cnt = num_value(&attributes, "cnt");
-    if cnt.is_some() {
-        map.insert("cnt".to_string(), cnt.unwrap());
-    }
-
-    let lst = num_value(&attributes, "lst");
-    if lst.is_some() {
-        map.insert("lst".to_string(), lst.unwrap());
-    }
-
-    let fst = num_value(&attributes, "fst");
-    if fst.is_some() {
-        map.insert("fst".to_string(), fst.unwrap());
-    }
-
-    serde_json::Value::Object(map)
-}
-
-async fn json_response(response: &Value) -> Result<Response<Body>, Error> {
+async fn json_response(response: &Record) -> Result<Response<Body>, Error> {
     let resp = match serde_json::to_string(&response) {
         Ok(json_resp) => {
             Response::builder()
@@ -62,10 +37,12 @@ async fn json_response(response: &Value) -> Result<Response<Body>, Error> {
 }
 
 async fn get_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
+    let key_av = serde_dynamo::to_attribute_value(key)?;
+
     let response = client
         .get_item()
         .table_name("Dedup")
-        .key("pk", AttributeValue::S(key.into()))
+        .key("pk", key_av)
         .projection_expression("cnt,fst,lst")
         .send()
         .await;
@@ -87,8 +64,15 @@ async fn get_handler(client: &Client, key:&str) -> Result<Response<Body>, Error>
             .map_err(Box::new)?)
     };
 
-    let obj = into_json(&item);
-    json_response(&obj).await
+    let Ok(rec) = serde_dynamo::from_item(item) else {
+         return Ok(Response::builder()
+            .status(500)
+            .header("content-type", "text/plain")
+            .body(format!("Internal Server Error: deserialization failure").into())
+            .map_err(Box::new)?)
+    };
+
+    json_response(&rec).await
 }
 
 async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error> {
@@ -102,14 +86,19 @@ async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error>
 
     let exp = now + 365 * 24 * 60 * 60;
 
+    let key_av = serde_dynamo::to_attribute_value(key)?;
+    let cnt_av = serde_dynamo::to_attribute_value(1)?;
+    let now_av = serde_dynamo::to_attribute_value(now)?;
+    let exp_av = serde_dynamo::to_attribute_value(exp)?;
+
     let response = client
         .update_item()
         .table_name("Dedup")
-        .key("pk", AttributeValue::S(key.into()))
+        .key("pk", key_av)
         .update_expression("ADD cnt :cnt SET lst = :now, fst = if_not_exists(fst, :now), exp = if_not_exists(exp, :exp)")
-        .expression_attribute_values(":cnt", AttributeValue::N(1.to_string()))
-        .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
-        .expression_attribute_values(":exp", AttributeValue::N(exp.to_string()))
+        .expression_attribute_values(":cnt", cnt_av)
+        .expression_attribute_values(":now", now_av)
+        .expression_attribute_values(":exp", exp_av)
         .return_values(ReturnValue::AllNew)
         .send()
         .await;
@@ -131,8 +120,15 @@ async fn put_handler(client: &Client, key:&str) -> Result<Response<Body>, Error>
             .map_err(Box::new)?)
     };
 
-    let obj = into_json(&attributes);
-    json_response(&obj).await
+    let Ok(rec) = serde_dynamo::from_item(attributes) else {
+         return Ok(Response::builder()
+            .status(500)
+            .header("content-type", "text/plain")
+            .body(format!("Internal Server Error: deserialization failure").into())
+            .map_err(Box::new)?)
+    };
+
+    json_response(&rec).await
 }
 
 async fn handler(client: &Client, event: Request) -> Result<Response<Body>, Error> {
